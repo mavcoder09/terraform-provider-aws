@@ -26,6 +26,25 @@ func resourceAwsLaunchConfiguration() *schema.Resource {
 			State: schema.ImportStatePassthrough,
 		},
 
+		CustomizeDiff: func(diff *schema.ResourceDiff, v interface{}) error {
+			if v, ok := diff.Get("ebs_block_device"); ok {
+				ebsDevice := v.(*schema.Set).List()
+				for _, device := range ebsDevice {
+					m := device.(map[string]interface{})
+					deleteOnTermination := m["delete_on_termination"].(bool)
+					noDevice := m["no_device"].(bool)
+					deviceName := m["device_name"].(string)
+
+					if deleteOnTermination && noDevice {
+						return fmt.Errorf("Cannot specify both delete_on_termination = true (default) "+
+							"and no_device = true for ebs_block_device (%q). Please set explicitely "+
+							"delete_on_termination = false if you wish to remove device via no_device.", deviceName)
+					}
+				}
+			}
+			return nil
+		},
+
 		Schema: map[string]*schema.Schema{
 			"name": {
 				Type:          schema.TypeString,
@@ -143,11 +162,20 @@ func resourceAwsLaunchConfiguration() *schema.Resource {
 				Type:     schema.TypeSet,
 				Optional: true,
 				Computed: true,
+				Set: func(v interface{}) int {
+					r := resourceAwsLaunchConfiguration().Schema["ebs_block_device"].Elem.(*schema.Resource)
+					f := schema.HashResource(r)
+					idx := f(v)
+
+					log.Printf("[DEBUG] CRUD computed idx %d from %#v", idx, v)
+					return idx
+				},
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
 						"delete_on_termination": {
 							Type:     schema.TypeBool,
 							Optional: true,
+							Default:  true,
 							ForceNew: true,
 						},
 
