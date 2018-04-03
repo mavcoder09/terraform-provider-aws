@@ -27,19 +27,12 @@ func resourceAwsLaunchConfiguration() *schema.Resource {
 		},
 
 		CustomizeDiff: func(diff *schema.ResourceDiff, v interface{}) error {
-			if v, ok := diff.Get("ebs_block_device"); ok {
+			if v, ok := diff.GetOk("block_device_mapping"); ok {
 				ebsDevice := v.(*schema.Set).List()
 				for _, device := range ebsDevice {
 					m := device.(map[string]interface{})
-					deleteOnTermination := m["delete_on_termination"].(bool)
-					noDevice := m["no_device"].(bool)
-					deviceName := m["device_name"].(string)
-
-					if deleteOnTermination && noDevice {
-						return fmt.Errorf("Cannot specify both delete_on_termination = true (default) "+
-							"and no_device = true for ebs_block_device (%q). Please set explicitely "+
-							"delete_on_termination = false if you wish to remove device via no_device.", deviceName)
-					}
+					// TODO: Validate conflicting "virtual_name" & "ebs"
+					// TODO: Validate conflicting "ebs" && "no_device"
 				}
 			}
 			return nil
@@ -158,36 +151,98 @@ func resourceAwsLaunchConfiguration() *schema.Resource {
 				Default:  true,
 			},
 
-			"ebs_block_device": {
+			"block_device_mapping": {
 				Type:     schema.TypeSet,
 				Optional: true,
-				Computed: true,
-				Set: func(v interface{}) int {
-					r := resourceAwsLaunchConfiguration().Schema["ebs_block_device"].Elem.(*schema.Resource)
-					f := schema.HashResource(r)
-					idx := f(v)
-
-					log.Printf("[DEBUG] CRUD computed idx %d from %#v", idx, v)
-					return idx
-				},
+				ForceNew: true,
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
-						"delete_on_termination": {
-							Type:     schema.TypeBool,
+						"device_name": {
+							Type:     schema.TypeString,
 							Optional: true,
-							Default:  true,
 							ForceNew: true,
 						},
 
-						"device_name": {
+						"virtual_name": {
 							Type:     schema.TypeString,
-							Required: true,
+							Optional: true,
 							ForceNew: true,
 						},
 
 						"no_device": {
 							Type:     schema.TypeBool,
 							Optional: true,
+							ForceNew: true,
+						},
+
+						"ebs": {
+							Type:     schema.TypeList,
+							MaxItems: 1,
+							Optional: true,
+							ForceNew: true,
+							Elem: &schema.Resource{
+								Schema: map[string]*schema.Schema{
+									"delete_on_termination": {
+										Type:     schema.TypeBool,
+										Optional: true,
+										Default:  true,
+										ForceNew: true,
+									},
+									"iops": {
+										Type:     schema.TypeInt,
+										Optional: true,
+										Computed: true,
+										ForceNew: true,
+									},
+									"snapshot_id": {
+										Type:     schema.TypeString,
+										Optional: true,
+										Computed: true,
+										ForceNew: true,
+									},
+									"volume_size": {
+										Type:     schema.TypeInt,
+										Optional: true,
+										Computed: true,
+										ForceNew: true,
+									},
+									"volume_type": {
+										Type:     schema.TypeString,
+										Optional: true,
+										Computed: true,
+										ForceNew: true,
+									},
+									"encrypted": {
+										Type:     schema.TypeBool,
+										Optional: true,
+										Computed: true,
+										ForceNew: true,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+
+			// TODO: Deprecated fields, remove in the next major version
+			"ebs_block_device": {
+				Type:       schema.TypeSet,
+				Optional:   true,
+				Computed:   true,
+				Deprecated: "Use 'block_device_mapping' instead.",
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"device_name": {
+							Type:     schema.TypeString,
+							Required: true,
+							ForceNew: true,
+						},
+
+						"delete_on_termination": {
+							Type:     schema.TypeBool,
+							Optional: true,
+							Default:  true,
 							ForceNew: true,
 						},
 
@@ -228,11 +283,11 @@ func resourceAwsLaunchConfiguration() *schema.Resource {
 					},
 				},
 			},
-
 			"ephemeral_block_device": {
-				Type:     schema.TypeSet,
-				Optional: true,
-				ForceNew: true,
+				Type:       schema.TypeSet,
+				Optional:   true,
+				ForceNew:   true,
+				Deprecated: "Use 'block_device_mapping' instead.",
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
 						"device_name": {
@@ -256,10 +311,11 @@ func resourceAwsLaunchConfiguration() *schema.Resource {
 			},
 
 			"root_block_device": {
-				Type:     schema.TypeList,
-				Optional: true,
-				Computed: true,
-				MaxItems: 1,
+				Type:       schema.TypeList,
+				Optional:   true,
+				Computed:   true,
+				MaxItems:   1,
+				Deprecated: "Use 'block_device_mapping' instead.",
 				Elem: &schema.Resource{
 					// "You can only modify the volume size, volume type, and Delete on
 					// Termination flag on the block device mapping entry for the root
@@ -371,33 +427,35 @@ func resourceAwsLaunchConfigurationCreate(d *schema.ResourceData, meta interface
 		vL := v.(*schema.Set).List()
 		for _, v := range vL {
 			bd := v.(map[string]interface{})
-			ebs := &autoscaling.Ebs{}
 
-			// Both EBS & no-device cannot be specified (those are opposite things)
-			// There's currently no way to check if a boolean arg was specified or not
-			// as GetOkExists doesn't work inside Sets
-			if v, ok := bd["no_device"].(bool); !ok && v {
-				ebs.DeleteOnTermination = aws.Bool(bd["delete_on_termination"].(bool))
-			}
+			var ebs *autoscaling.Ebs
+			if ebsBlock, ok := bd["ebs"]; ok {
+				ebs = expandAutoscalingEbs(ebsBlock.([]interface{}))
+			} else {
+				// TODO: Legacy logic for deprecated fields, remove in next major version
+				ebs = &autoscaling.Ebs{
+					DeleteOnTermination: aws.Bool(bd["delete_on_termination"].(bool)),
+				}
 
-			if v, ok := bd["snapshot_id"].(string); ok && v != "" {
-				ebs.SnapshotId = aws.String(v)
-			}
+				if v, ok := bd["snapshot_id"].(string); ok && v != "" {
+					ebs.SnapshotId = aws.String(v)
+				}
 
-			if v, ok := bd["encrypted"].(bool); ok && v {
-				ebs.Encrypted = aws.Bool(v)
-			}
+				if v, ok := bd["encrypted"].(bool); ok && v {
+					ebs.Encrypted = aws.Bool(v)
+				}
 
-			if v, ok := bd["volume_size"].(int); ok && v != 0 {
-				ebs.VolumeSize = aws.Int64(int64(v))
-			}
+				if v, ok := bd["volume_size"].(int); ok && v != 0 {
+					ebs.VolumeSize = aws.Int64(int64(v))
+				}
 
-			if v, ok := bd["volume_type"].(string); ok && v != "" {
-				ebs.VolumeType = aws.String(v)
-			}
+				if v, ok := bd["volume_type"].(string); ok && v != "" {
+					ebs.VolumeType = aws.String(v)
+				}
 
-			if v, ok := bd["iops"].(int); ok && v > 0 {
-				ebs.Iops = aws.Int64(int64(v))
+				if v, ok := bd["iops"].(int); ok && v > 0 {
+					ebs.Iops = aws.Int64(int64(v))
+				}
 			}
 
 			if *aws.String(bd["device_name"].(string)) == *rootDeviceName {
@@ -658,4 +716,41 @@ func readBlockDevicesFromLaunchConfiguration(d *schema.ResourceData, lc *autosca
 		}
 	}
 	return blockDevices, nil
+}
+
+func expandAutoscalingEbs(in []interface{}) *autoscaling.Ebs {
+	if len(in) == 0 || in[0] == nil {
+		return nil
+	}
+	m := in[0].(map[string]interface{})
+
+	ebs := &autoscaling.Ebs{
+		DeleteOnTermination: aws.Bool(m["delete_on_termination"].(bool)),
+	}
+
+	if v, ok := m["snapshot_id"].(string); ok && v != "" {
+		ebs.SnapshotId = aws.String(v)
+	}
+
+	if v, ok := m["encrypted"].(bool); ok && v {
+		ebs.Encrypted = aws.Bool(v)
+	}
+
+	if v, ok := m["volume_size"].(int); ok && v != 0 {
+		ebs.VolumeSize = aws.Int64(int64(v))
+	}
+
+	if v, ok := m["volume_type"].(string); ok && v != "" {
+		ebs.VolumeType = aws.String(v)
+	}
+
+	if v, ok := m["iops"].(int); ok && v > 0 {
+		ebs.Iops = aws.Int64(int64(v))
+	}
+
+	return ebs
+}
+
+func flattenAutoscalingEbs(in *autoscaling.Ebs) []interface{} {
+
 }

@@ -516,13 +516,17 @@ resource "aws_launch_configuration" "bar" {
 	}
 	ebs_block_device {
 		device_name = "/dev/sdb"
-		volume_size = 9
+		ebs {
+			volume_size = 9
+		}
 	}
 	ebs_block_device {
 		device_name = "/dev/sdc"
-		volume_size = 10
-		volume_type = "io1"
-		iops = 100
+		ebs {
+			volume_size = 10
+			volume_type = "io1"
+			iops = 100
+		}
 	}
 	ephemeral_block_device {
 		device_name = "/dev/sde"
@@ -571,8 +575,10 @@ resource "aws_launch_configuration" "baz" {
 	}
 	ebs_block_device {
 		device_name = "/dev/sdb"
-		volume_size = 9
-		encrypted = true
+		ebs {
+			volume_size = 9
+			encrypted = true
+		}
 	}
 }
 `
@@ -589,8 +595,10 @@ resource "aws_launch_configuration" "baz" {
 	}
 	ebs_block_device {
 		device_name = "/dev/sdb"
-		volume_size = 10
-		encrypted = true
+		ebs {
+			volume_size = 10
+			encrypted = true
+		}
 	}
 }
 `
